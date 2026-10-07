@@ -2,6 +2,8 @@
 
 역할표 3번 담당 범위인 **알려진 핵 EXE 해시 대조, YARA 메모리 시그니처 검사, 하트비트 송신 클라이언트**를 한 폴더에 묶었다. 탐지 결과는 로컬 파일에 남기고, 중앙 전송 설정이 있으면 `shared.logger`의 대기열에도 넣는다. 게임 값을 쓰거나 핵을 자동 차단·밴하지 않는다.
 
+이 구현에 Raw Input·회전 비교 탐지기는 없다. 전체 Launcher 검증 문서의 “입력 이상 양성 검증”은 이 모듈의 YARA·해시 양성 검증과 동일한 항목으로 처리하지 않는다. 그 기능이 필요하면 별도 담당·데이터 소스·판정 규칙을 먼저 확정해야 한다.
+
 ## 구성
 
 | 파일 | 역할 |
@@ -33,7 +35,16 @@ py -3.12 -m venv .venv
 
 결과는 `sessions/<session-id>/`의 `manifest.json`, `events.jsonl`, `raw/yara_scan.jsonl`, `raw/executable_hashes.jsonl`, `raw/heartbeat.jsonl`에 남는다. `sessions/`는 개인 PC 정보가 들어갈 수 있어 Git 추적에서 제외했다. 로그를 팀에 공유할 때는 PID·로컬 경로 등을 검토한다.
 
-중앙 탐지 전송을 사용하려면 **런처가 실행하는 바로 그 Python**에 `requirements.txt`를 설치하고, 런처 환경에 `GZZ_TELEMETRY_URL`(HTTPS 서버 origin)과 `GZZ_TELEMETRY_TOKEN`을 제공한다. 스캐너는 시작할 때 한 번 `configure_client(ClientConfig.from_env())`를 호출한다. 매 평가 결과는 기존 `events.jsonl`에 기록한 뒤 `send_detection()`으로 보낸다. 종료 시 `flush_client()`와 `shutdown_client()`를 호출한다. `GZZ_TELEMETRY_OUTBOX`를 별도로 지정하지 않으면 이 모듈 전용 `telemetry-outbox/client.sqlite3`를 사용한다. 다른 모듈과 같은 outbox를 공유하지 않는다. `send_detection()`의 `queued`는 **로컬 대기열 저장**이지 서버 수신 성공이 아니다. 전송 오류는 스캐너의 표준 오류 및 런처의 `input_signature.log`에 남고, 탐지 점수나 로컬 결과를 바꾸지 않는다. 실제 중앙 저장은 receiver와 함께 종단 테스트해야 한다.
+런처가 실행하는 **바로 그 Python**에 `requirements.txt`를 설치한다. 레포 최상위에서 다음 명령으로 버전을 확인한다. `yara` import나 버전 확인이 실패하면 런처는 `input_signature`를 필수 모듈 `FAILED`로 표시하고 시작하지 않는다. 현재 고정 버전 4.5.4는 Windows CPython 3.14 사전 빌드 패키지가 없으므로 팀이 검증한 64비트 Python 3.12 환경을 권장한다. 소스 빌드 3.14는 검증되지 않았다.
+
+```powershell
+$launcherPython = (Resolve-Path .\.venv-launcher\Scripts\python.exe).Path
+& $launcherPython -m pip install --only-binary=:all: -r .\client\LocalGuard\input_signature\requirements.txt
+& $launcherPython -c "import sys, yara; print(sys.executable); print(yara.__version__)"
+& $launcherPython .\client\Launcher\main.py --session normal_test_001
+```
+
+중앙 탐지 전송을 사용하려면 런처 환경에 `GZZ_TELEMETRY_URL`(HTTPS 서버 origin)과 `GZZ_TELEMETRY_TOKEN`을 제공한다. 스캐너는 시작할 때 한 번 `configure_client(ClientConfig.from_env())`를 호출한다. 매 평가 결과는 기존 `events.jsonl`에 기록한 뒤 `send_detection()`으로 보낸다. 종료 시 `flush_client()`와 `shutdown_client()`를 호출한다. `GZZ_TELEMETRY_OUTBOX`를 별도로 지정하지 않으면 이 모듈 전용 `telemetry-outbox/client.sqlite3`를 사용한다. 다른 모듈과 같은 outbox를 공유하지 않는다. `send_detection()`의 `queued`는 **로컬 대기열 저장**이지 서버 수신 성공이 아니다. 전송 오류는 스캐너의 표준 오류 및 런처의 `input_signature.log`에 남고, 탐지 점수나 로컬 결과를 바꾸지 않는다. 실제 중앙 저장은 receiver와 함께 종단 테스트해야 한다.
 
 테스트는 다음과 같이 실행한다. 네이티브 fixture 검사 한 건은 C 컴파일러가 없으면 건너뛴다. 실험용 세션 생성·검증 도구는 `tests/`에만 있다.
 
@@ -53,7 +64,7 @@ $env:MECCHA_HEARTBEAT_TOKEN = 'receiver가 발급한 토큰'
 
 원격 URL은 HTTPS가 필수이며 HTTP는 loopback 테스트에만 허용한다. 서버는 같은 `session_id`·`client_id`·`sequence`로 확인 응답해야 한다. 요청·응답 형식은 [`TELEMETRY_CONTRACT.md`](TELEMETRY_CONTRACT.md)에 명시한 **임시 계약**으로, 서버·Launcher 담당자와 합의 후 확정해야 한다.
 
-탐지 Event의 중앙 경로는 이제 `/events`가 아니라 `shared`의 `POST /api/detection`이다. `server/receiver/router.py`에 해당 수신 라우터도 있다. 다만 중앙 scoring 연결과 실제 배포 서버에서의 저장 성공은 별도 검증이 필요하다. 하트비트의 `POST /api/heartbeat`는 이 탐지 API와 **별개**이며, 수신 API가 확정되지 않아 현재는 로컬 기록 및 임시 계약에 따른 선택적 송신까지만 지원한다. 최종 Launcher의 단일 집계 하트비트도 아직 연결되지 않았다. 런처 등록표는 이미 `yara_scanner.py`에 `--session-id {session} --player-id {player}`를 전달하지만, `--t0 {t0}`는 아직 전달하지 않는다. 이 스캐너는 같은 세션 폴더를 다시 사용할 수 없으므로 재시작 정책도 별도 협의가 필요하다. 나중에 Launcher가 세션 전체 하트비트를 보내면 자식 스캐너의 `--heartbeat-url`은 비워 중복 발신을 피해야 한다.
+탐지 Event는 `shared`의 `POST /api/detection`으로 보내며 하트비트의 `POST /api/heartbeat`와 구분한다. 현재 Launcher는 `yara_scanner.py`에 공통 `--session-id`, `--player-id`, `--t0`를 전달하고, 등록된 모듈 상태를 합쳐 **Launcher 한 곳에서** 하트비트를 발신한다. 런처가 자식 스캐너의 하트비트 주소·토큰을 제거하므로 중복 전송하지 않는다. 스캐너를 독립 실행할 때만 위 선택적 하트비트 설정을 사용한다. 같은 세션 폴더를 다시 사용할 수 없어 런처의 자동 재시작은 꺼져 있다. 운영 서버의 실제 수신·저장·Dashboard 반영은 별도 종단 테스트로 확인해야 한다.
 
 ## 업로드 범위
 

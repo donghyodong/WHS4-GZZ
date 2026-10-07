@@ -46,7 +46,7 @@ import launcher_heartbeat                                     # noqa: E402
 import registry                                               # noqa: E402
 import ui                                                     # noqa: E402
 from modules import MODULES, REPO                              # noqa: E402
-from process_manager import (FINAL_WAIT_S, MISSING, RUNNING, ProcessManager,  # noqa: E402
+from process_manager import (FAILED, FINAL_WAIT_S, MISSING, RUNNING, ProcessManager,  # noqa: E402
                              SKIPPED, is_admin)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -139,6 +139,12 @@ def preflight(pm, only, *, allow_game_path_prompt=None):
         ui.line("  아직 안 올라온 모듈 (런처는 그대로 진행합니다):")
         for s in missing:
             ui.line(f"    - {s.name:<18} {s.detail}")
+    unavailable = [s for s in pm.states.values() if s.status in (FAILED, SKIPPED)]
+    if unavailable:
+        ui.line("")
+        ui.line("  시작 전에 확인이 필요한 모듈:")
+        for s in unavailable:
+            ui.line(f"    - {s.name:<18} {s.status}: {s.detail}")
     if only:
         ui.line(f"  --only: {', '.join(only)}")
     root = publish_game_dir(allow_prompt=allow_game_path_prompt)

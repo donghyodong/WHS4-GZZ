@@ -134,6 +134,9 @@ class ProcessManager:
                 # 만들었는데 안 붙는 것은 원인이 완전히 다르다.
                 st.status = MISSING
                 st.detail = f"{os.path.relpath(path, REPO)} 없음 — {m.owner}"
+            elif m.startup_error:
+                st.status = FAILED
+                st.detail = m.startup_error
             elif m.needs_admin and not admin:
                 st.status = SKIPPED
                 st.detail = "관리자 권한으로 실행해야 합니다"
@@ -150,7 +153,7 @@ class ProcessManager:
     # ── 실행 ───────────────────────────────────────────────────────────
     def start(self, name: str, final: bool = False) -> bool:
         st = self.states[name]
-        if st.status in (MISSING, SKIPPED):
+        if st.status in (MISSING, SKIPPED) or st.module.startup_error:
             return False
         if st.proc is not None and st.proc.poll() is None:
             return True                      # 이미 돌고 있다

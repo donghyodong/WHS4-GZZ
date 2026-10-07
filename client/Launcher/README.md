@@ -18,6 +18,38 @@ python client/Launcher/main.py
 
 커널 모듈을 쓰려면 **관리자 권한**으로 실행해야 한다. 아니면 그 모듈만 건너뛴다.
 
+### Launcher Python과 YARA 의존성
+
+런처는 자신을 실행한 Python(`sys.executable`)으로 `input_signature`를 포함한
+자식 모듈을 띄운다. 다른 가상환경에 `yara-python`을 설치해도 이 런처에는 적용되지
+않는다. 현재 고정 버전 `yara-python==4.5.4`의 Windows 사전 빌드 패키지는
+CPython 3.10~3.13용이며, 팀에서 검증한 실행 환경은 64비트 Python 3.12다.
+Python 3.14의 소스 빌드는 검증되지 않았으므로, 전체 Launcher 테스트에는
+3.12 또는 확인된 3.13 환경을 사용한다. 예를 들어 레포 최상위에서:
+
+```powershell
+py -3.12 -m venv .venv-launcher
+$launcherPython = (Resolve-Path .\.venv-launcher\Scripts\python.exe).Path
+& $launcherPython -m pip install --only-binary=:all: -r .\client\LocalGuard\input_signature\requirements.txt
+& $launcherPython -c "import sys, yara; print(sys.executable); print(yara.__version__)"
+& $launcherPython .\client\Launcher\main.py --session normal_test_001
+```
+
+`py -3.12`가 없다면 설치된 64비트 Python 3.12의 `python.exe` 전체 경로로
+첫 줄을 실행한다. 실행 전 출력된 Python 경로와 YARA 버전 `4.5.4`를 확인하고,
+다른 모듈이 요구하는 의존성도 각 README에 따라 **같은 환경**에 준비한다.
+런처는 시작할 때 YARA를 실제 import해 버전을 확인한다. 실패하면
+`input_signature`를 `FAILED`로 표시하고 실행하지 않으며, 통합 하트비트에도
+필수 모듈 실패로 남긴다. 다른 모듈은 계속 실행한다. 자동으로 패키지를 설치하거나
+검사 실패를 정상 0점으로 바꾸지 않는다.
+
+실제 게임 라운드의 전체 프로세스 메모리 YARA 검사는 2026-10-07 측정에서
+62.9초가 걸렸다(같은 PC의 로비에서는 31.8초). 기존 45초 제한은 정상
+라운드에서도 시간 초과를 만들었으므로 런처는 검사 제한을 120초로 설정하고
+종료 대기에도 그 시간을 반영한다. 120초를 넘기거나 메모리를 읽지 못하면
+검사 실패로 남기며 정상 0점으로 전환하지 않는다. 이 설정은 탐지 성능이나
+모든 PC에서의 완료를 보장하지 않으므로 실게임 회귀 검사가 필요하다.
+
 SelfDefense Watchdog는 기존 `self_defense` 등록으로 실행한다. 별도
 `selfdefense_integrity` 항목은 파일 무결성 검사기이며 게임보다 먼저 실행한다.
 다만 승인된 배포 기준이 없는 PC에서는 `SKIPPED`로 표시하고 시작하지 않는다.

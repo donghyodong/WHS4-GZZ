@@ -22,6 +22,7 @@
 import os
 import sys
 from dataclasses import dataclass, field
+from importlib import import_module
 from typing import Dict, List, Optional, Tuple
 
 # 이 파일은 client/Launcher/ 에 있다. 레포 루트는 두 단계 위.
@@ -84,6 +85,9 @@ class Module:
     # Release prerequisites that have not been supplied yet. Keep the module
     # visible as SKIPPED instead of starting it with placeholder arguments.
     disabled_reason: str = ""
+    # A required runtime dependency is broken. Show FAILED (and keep it required
+    # in the Launcher heartbeat) instead of silently treating it as optional.
+    startup_error: str = ""
 
     @staticmethod
     def _fill(a: str, ctx: Dict[str, object]) -> str:
@@ -128,9 +132,43 @@ PY = sys.executable
 
 # input_signature 의 YARA 검사 한 번 제한(초). 종료 요청은 진행 중인 검사가 끝나야
 # 처리되므로(rules.match 는 중간에 못 끊는다) 끌 때 기다리는 시간도 이 값에 맞춘다.
-# 동효님 실측: 평가 한 번에 20초~1분(9/30). 둘을 따로 바꾸면 검사 도중 강제 종료돼
-# manifest 가 running 으로 남는다. 그래서 한 곳에서 같이 정한다.
-YARA_TIMEOUT_S = 45
+# 2026-10-07 실제 라운드 검사에서 62.9초가 걸렸다. 45초 제한은 정상 라운드도
+# 시간 초과로 만들었으므로 스캐너가 허용하는 최대 120초로 늘린다. 이 시간에도
+# 끝나지 않으면 검사 실패로 보고한다. 종료 대기는 이 값과 함께 조정해야 한다.
+YARA_TIMEOUT_S = 120
+
+
+def yara_runtime_error() -> str:
+    """Check the same Python interpreter that Launcher uses for its children."""
+    try:
+        yara = import_module("yara")
+    except Exception as exc:
+        return ("필수 yara-python==4.5.4 로드 실패 "
+                f"({type(exc).__name__}); Launcher Python: {sys.executable}. "
+                "이 Python에 client/LocalGuard/input_signature/requirements.txt를 설치하세요")
+    version = getattr(yara, "__version__", None)
+    if version != "4.5.4":
+        return (f"yara-python 버전 불일치 ({version or 'unknown'} != 4.5.4); "
+                f"Launcher Python: {sys.executable}")
+    return ""
+
+
+def input_signature_module() -> Module:
+    return Module(
+        name="input_signature",
+        owner="3번 (동효)",
+        argv=[PY, "client/LocalGuard/input_signature/yara_scanner.py",
+              "--session-id", "{session}", "--player-id", "{player}",
+              # Event·하트비트·ON/OFF 표식은 런처 세션 시작 기준이다.
+              "--t0", "{t0}", "--timeout", str(YARA_TIMEOUT_S)],
+        stop_grace_s=YARA_TIMEOUT_S + 10,
+        # 같은 세션 폴더를 다시 만들 수 없으므로 자동 재시작하지 않는다.
+        restart=False,
+        session_log_dir="client/LocalGuard/input_signature/sessions",
+        # --auto-external-python 은 다른 팀 Python 탐지기를 잡을 수 있어 사용하지 않는다.
+        note="YARA·실행 파일 해시. --seconds 기본 0 이라 끝까지 돈다",
+        startup_error=yara_runtime_error(),
+    )
 
 
 def selfdefense_integrity_module() -> Module:
@@ -259,27 +297,7 @@ MODULES: List[Module] = [
         mode=CONTINUOUS,
         note="게임 DLL 기준선·추가·변경 감시. shared 0.2.0 공통 이벤트 전송",
     ),
-    Module(
-        name="input_signature",
-        owner="3번 (동효)",
-        argv=[PY, "client/LocalGuard/input_signature/yara_scanner.py",
-              "--session-id", "{session}", "--player-id", "{player}",
-              # 동효님 #51 부터 받는다. Event·하트비트·ON/OFF 표식이 런처 세션 시작
-              # 기준으로 찍힌다. --seconds 는 여전히 이 검사기 자체 실행 시간이다.
-              "--t0", "{t0}",
-              "--timeout", str(YARA_TIMEOUT_S)],
-        # 검사 한 번 + manifest 마무리(하트비트 전송 제한 3초 등) 여유.
-        stop_grace_s=YARA_TIMEOUT_S + 10,
-        # 세션 폴더를 exist_ok=False 로 만든다(replay_events.py ReplaySession).
-        # 같은 --session-id 로 되살리면 반드시 FileExistsError 로 다시 죽어서,
-        # 되살릴수록 재시작 예산만 태운다. 경로 설계가 바뀌면 True 로 되돌린다.
-        restart=False,
-        session_log_dir="client/LocalGuard/input_signature/sessions",
-        # --auto-external-python 은 일부러 안 넘긴다. 그 옵션은 같은 세션의
-        # python.exe 를 후보로 삼고 게임·자기자신·자기 부모만 빼기 때문에,
-        # 런처가 띄운 다른 파이썬 탐지기를 검사 대상으로 잡는다(자기탐지).
-        note="Raw Input 대조·YARA·해시. --seconds 기본 0 이라 끝까지 돈다",
-    ),
+    input_signature_module(),
     Module(
         name="memory_integrity",
         owner="2번 (재민·랑언)",
